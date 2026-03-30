@@ -127,6 +127,39 @@ class BatchSummary:
         return json.dumps(self.to_dict(), indent=2)
 
 
+# Ancient explorers, philosophers, and polymaths
+_AGENT_NAMES = [
+    # Explorers & navigators
+    "Pytheas", "Hanno", "Nearchus", "Scylax", "Eudoxus", "Hippalus",
+    "Pythagoras", "Hecataeus", "Megasthenes", "Patrocles",
+    # Philosophers & thinkers
+    "Thales", "Anaximander", "Heraclitus", "Democritus", "Empedocles",
+    "Xenophanes", "Parmenides", "Zeno", "Anaxagoras", "Leucippus",
+    # Polymaths & scientists
+    "Archimedes", "Eratosthenes", "Hipparchus", "Ptolemy", "Strabo",
+    "Posidonius", "Aristarchus", "Ctesibius", "Philo", "Hero",
+    # Legendary voyagers
+    "Odysseus", "Orpheus", "Daedalus", "Heracles", "Jason",
+    "Theseus", "Perseus", "Bellerophon", "Atalanta", "Medea",
+]
+
+
+def _assign_name(index: int, used: set[str]) -> str:
+    """Assign a unique name from the pool, cycling if needed."""
+    pool = _AGENT_NAMES[:]
+    # Start at the index position so different batches get different names
+    candidate = pool[index % len(pool)]
+    if candidate not in used:
+        return candidate
+    # Walk forward until we find an unused name
+    for offset in range(1, len(pool)):
+        candidate = pool[(index + offset) % len(pool)]
+        if candidate not in used:
+            return candidate
+    # Fallback: append index
+    return f"{pool[index % len(pool)]}_{index}"
+
+
 # Sweep variations for mutation weights
 _SWEEP_PROFILES = [
     {"label": "baseline", "weights": {"prompt_chain_refactor": 0.35, "inference_pipeline": 0.30, "tool_graph_rewire": 0.15, "lora_merge": 0.15, "memory_index_rebuild": 0.05}},
@@ -265,17 +298,19 @@ class BatchRunner:
             verbose=False,
         )
 
+        used_names: set[str] = set()
         for i in range(self.config.num_agents):
             agent_config = copy.deepcopy(base_agent)
             sim_config = copy.deepcopy(base_sim)
 
-            label = f"agent_{i:03d}"
+            name = _assign_name(i, used_names)
+            used_names.add(name)
+            label = name
 
             if self.config.sweep:
                 # Cycle through sweep profiles
                 profile = _SWEEP_PROFILES[i % len(_SWEEP_PROFILES)]
                 sim_config.mutation_weights = profile["weights"]
-                label = f"{profile['label']}_{i:03d}"
 
                 # Vary initial system prompt
                 agent_config.system_prompt = _SWEEP_PROMPTS[i % len(_SWEEP_PROMPTS)]
