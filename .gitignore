@@ -1,0 +1,74 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+*.whl
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Rust
+zk_circuits/target/
+zk_circuits/Cargo.lock
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment
+.env
+.env.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Logs
+*.log
+logs/
+
+# IPFS
+.ipfs/
+
+# Model weights (too large for git)
+*.pt
+*.bin
+*.safetensors
+*.gguf
+
+# Batch results (generated output — pushed to GitHub via API separately)
+batch_results*/
+
+# Vercel metadata
+taoforge-web/.vercel/
+
+# Frontend build output & deps
+taoforge-web/dist/
+taoforge-web/node_modules/
+
+# Misc artifacts
+files.zip
+null
+
+# Claude Code local settings (machine-specific)
+.claude/
+
+# Nested frontend repo (has its own git)
+taoforge-web/
+
+# Test batch runs
+batch_test/

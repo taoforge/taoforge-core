@@ -1,0 +1,37 @@
+[package]
+name = "taoforge-zk-circuits"
+version = "0.1.0"
+edition = "2021"
+description = "ZK proof circuits for TaoForge — proof-of-improvement on Bittensor"
+
+[lib]
+name = "taoforge_zk"
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+# ZK proof system
+halo2_proofs = "0.3"
+ff = "0.13"
+group = "0.13"
+
+# Python FFI
+pyo3 = { version = "0.22", features = ["extension-module"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Hashing
+sha2 = "0.10"
+
+# Error handling
+thiserror = "2.0"
+
+[dev-dependencies]
+rand = "0.8"
+criterion = "0.5"
+
+[[bench]]
+name = "proof_bench"
+harness = false
+path = "benches/proof_bench.rs"

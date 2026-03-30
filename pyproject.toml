@@ -1,0 +1,72 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "taoforge"
+version = "0.1.0"
+description = "TaoForge — Recursive Self-Improvement Protocol for Autonomous Agents"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+dependencies = [
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "numpy>=1.24",
+    "torch>=2.0",
+    "fastapi>=0.104",
+    "uvicorn>=0.24",
+    "httpx>=0.25",
+    "cryptography>=41.0",
+]
+
+[project.optional-dependencies]
+api = [
+    "openai>=1.0",
+    "anthropic>=0.7",
+]
+local = [
+    "transformers>=4.30",
+    "peft>=0.7",
+    "accelerate>=0.25",
+]
+ipfs = [
+    "ipfshttpclient>=0.8.0a2",
+]
+subnet = [
+    "bittensor>=10.0",
+]
+tui = [
+    "rich>=13.0",
+]
+all = [
+    "taoforge[api,local,ipfs,tui,subnet]",
+]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "ruff>=0.1.0",
+    "mypy>=1.5",
+]
+
+[project.scripts]
+taoforge = "taoforge.cli:main"
+taoforge-sim = "taoforge.sim.cli:main"
+taoforge-miner = "neurons.miner:main"
+taoforge-validator = "neurons.validator:main"
+
+[tool.setuptools.packages.find]
+include = ["taoforge*", "neurons*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"

@@ -1,0 +1,53 @@
+version: "3.8"
+
+services:
+  miner:
+    build: .
+    command: ["-m", "neurons.miner"]
+    ports:
+      - "${MINER_PORT:-8091}:8091"
+    environment:
+      - TAOFORGE_HOST=0.0.0.0
+      - TAOFORGE_PORT=8091
+      - TAOFORGE_SEED_PEERS=${SEED_PEERS:-}
+    volumes:
+      - miner_keys:/root/.taoforge
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  validator:
+    build: .
+    command: ["-m", "neurons.validator"]
+    ports:
+      - "${VALIDATOR_PORT:-8092}:8092"
+    environment:
+      - TAOFORGE_HOST=0.0.0.0
+      - TAOFORGE_PORT=8092
+      - TAOFORGE_SEED_PEERS=miner:8091
+    volumes:
+      - validator_keys:/root/.taoforge
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  ipfs:
+    image: ipfs/kubo:latest
+    ports:
+      - "5001:5001"
+      - "8080:8080"
+    volumes:
+      - ipfs_data:/data/ipfs
+
+volumes:
+  miner_keys:
+  validator_keys:
+  ipfs_data:
