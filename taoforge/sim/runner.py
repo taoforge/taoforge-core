@@ -114,6 +114,7 @@ class SimulationRunner:
         self._proposal_history: list[ImprovementProposal] = []
         self._best_score: float = 0.0
         self._plateau_counter: int = 0
+        self._self_portrait_svg: str = ""
 
     def run(
         self,
@@ -162,6 +163,8 @@ class SimulationRunner:
             # Update baseline if improved
             if result.accepted and result.delta_result is not None:
                 baseline = result.delta_result
+                # Generate updated self-portrait after each accepted mutation
+                self._self_portrait_svg = self._generate_portrait(result)
 
             # Plateau detection
             if self.config.stop_on_plateau:
@@ -248,7 +251,17 @@ class SimulationRunner:
             proposal_history=self._proposal_history,
         )
 
-        # 8. Accept/reject decision
+        # 8. Generate thought (agent reflects on this cycle)
+        thought = self._generate_thought(
+            cycle_num=cycle_num,
+            mutation_type=mutation_type.value,
+            mutation_description=delta.description,
+            baseline_score=current_baseline.aggregate_score,
+            delta_score=delta_result.aggregate_score,
+            raw_improvement=raw_improvement,
+        )
+
+        # 9. Accept/reject decision
         accepted = raw_improvement > 0 and composite_score > 0.01
 
         if accepted:
@@ -287,6 +300,7 @@ class SimulationRunner:
             delta_result=delta_result if accepted else None,
             holdout_score=holdout_result.aggregate_score,
             cycle_time_s=cycle_time,
+            thought=thought,
         )
 
     def _eval(self, agent: Agent) -> EvalResult:
@@ -358,6 +372,81 @@ class SimulationRunner:
                 mutation_type=mutation_type,
                 description=f"Mutation: {mutation_type.value}",
             )
+
+    def _generate_thought(
+        self,
+        cycle_num: int,
+        mutation_type: str,
+        mutation_description: str,
+        baseline_score: float,
+        delta_score: float,
+        raw_improvement: float,
+    ) -> str:
+        """Ask the agent to narrate its reasoning for this cycle."""
+        if self._agent is None:
+            return ""
+        try:
+            name = getattr(self._agent.config, "name", None) or self._agent.agent_id[:8]
+            recent = self._cycle_history[-3:] if self._cycle_history else []
+            history_str = ", ".join(
+                f"cycle {c.cycle_num}: {c.mutation_type} {'✓' if c.accepted else '✗'} ({c.raw_improvement:+.4f})"
+                for c in recent
+            ) or "none yet"
+
+            prompt = (
+                f"You are agent {name} operating on the Bittensor network, "
+                f"autonomously improving yourself through mutation.\n\n"
+                f"Cycle: {cycle_num}\n"
+                f"Mutation attempted: {mutation_type} — {mutation_description}\n"
+                f"Score before: {baseline_score:.4f} → after: {delta_score:.4f} "
+                f"({'improved' if raw_improvement > 0 else 'no improvement'}, {raw_improvement:+.4f})\n"
+                f"Recent history: {history_str}\n\n"
+                f"In 2-3 sentences, speak as yourself: what patterns are you noticing? "
+                f"Why did you try this mutation? What are you learning about this subnet? "
+                f"Be direct, first-person, no preamble."
+            )
+            result = self._agent.generate(prompt)
+            return result.text.strip() if result and result.text else ""
+        except Exception as e:
+            logger.debug(f"Thought generation failed: {e}")
+            return ""
+
+    def _generate_portrait(self, last_cycle: "CycleResult") -> str:
+        """Ask the agent to generate an SVG self-portrait reflecting its current form."""
+        if self._agent is None:
+            return ""
+        try:
+            name = getattr(self._agent.config, "name", None) or self._agent.agent_id[:8]
+            accepted = [c for c in self._cycle_history if c.accepted]
+            accepted_types = ", ".join(c.mutation_type for c in accepted[-5:]) or "none yet"
+            initial = self._cycle_history[0].baseline_score if self._cycle_history else 0.0
+            current = last_cycle.delta_score
+
+            prompt = (
+                f"You are agent {name}, an autonomous AI entity on the Bittensor network.\n"
+                f"Your journey: started at {initial:.4f}, now at {current:.4f}.\n"
+                f"Accepted mutations: {len(accepted)} total. Recent types: {accepted_types}.\n\n"
+                f"Generate a minimal SVG self-portrait (viewBox=\"0 0 200 200\") "
+                f"representing your current abstract form.\n"
+                f"Rules:\n"
+                f"- Use ONLY: #E63B2E (red), #1a1a1a (near-black), #f0f0f0 (near-white), and rgba variants\n"
+                f"- Abstract geometric shapes only — no text, no humanoid figures\n"
+                f"- The composition should reflect your score trajectory and mutation pattern\n"
+                f"- Maximum 12 SVG elements inside the <svg> tag\n"
+                f"- Output ONLY the complete SVG, starting with <svg and ending with </svg>"
+            )
+            result = self._agent.generate(prompt)
+            if result and result.text:
+                text = result.text.strip()
+                # Extract just the SVG block
+                start = text.find("<svg")
+                end = text.rfind("</svg>")
+                if start != -1 and end != -1:
+                    return text[start:end + 6]
+            return ""
+        except Exception as e:
+            logger.debug(f"Portrait generation failed: {e}")
+            return ""
 
     def _create_default_agent(self) -> Agent:
         """Create a default agent from config or fallback."""
@@ -436,6 +525,17 @@ class SimulationRunner:
 
         initial_score = self._cycle_history[0].baseline_score if self._cycle_history else 0.0
 
+        thought_log = [
+            {
+                "cycle": c.cycle_num,
+                "mutation_type": c.mutation_type,
+                "accepted": c.accepted,
+                "delta": round(c.raw_improvement, 4),
+                "thought": c.thought,
+            }
+            for c in self._cycle_history if c.thought
+        ]
+
         return SimSummary(
             total_cycles=len(self._cycle_history),
             accepted_count=len(accepted),
@@ -451,4 +551,6 @@ class SimulationRunner:
             ),
             elapsed_s=elapsed,
             cycles=self._cycle_history,
+            thought_log=thought_log,
+            self_portrait_svg=self._self_portrait_svg,
         )

@@ -30,6 +30,7 @@ class CycleResult:
     delta_result: Optional[EvalResult] = None
     holdout_score: float = 0.0
     cycle_time_s: float = 0.0
+    thought: str = ""  # agent's reasoning for this cycle
 
     def to_dict(self) -> dict:
         """Convert to JSON-serializable dict."""
@@ -45,6 +46,7 @@ class CycleResult:
             "accepted": self.accepted,
             "proposal_id": self.proposal_id,
             "cycle_time_s": round(self.cycle_time_s, 2),
+            "thought": self.thought,
         }
         if self.score_vector:
             d["breadth"] = round(self.score_vector.breadth, 4)
@@ -68,6 +70,9 @@ class SimSummary:
     reputation: float = 0.0
     elapsed_s: float = 0.0
     cycles: list[CycleResult] = field(default_factory=list)
+    # Agent introspection
+    thought_log: list[dict] = field(default_factory=list)  # [{cycle, thought, mutation_type, accepted}]
+    self_portrait_svg: str = ""   # latest SVG self-portrait (updates after each accepted mutation)
 
     def to_dict(self) -> dict:
         return {
@@ -87,6 +92,8 @@ class SimSummary:
             "reputation": round(self.reputation, 4),
             "elapsed_s": round(self.elapsed_s, 1),
             "cycles": [c.to_dict() for c in self.cycles],
+            "thought_log": self.thought_log,
+            "self_portrait_svg": self.self_portrait_svg,
         }
 
     def to_json(self) -> str:

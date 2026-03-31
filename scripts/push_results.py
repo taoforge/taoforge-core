@@ -112,6 +112,7 @@ def build_frontend_json(batch_dir: Path) -> dict:
                 "composite_score": round(c.get("composite_score", 0), 4),
                 "holdout_score":   round(c.get("holdout_score", 0), 4),
                 "regressions":     c.get("regressions", []),
+                "thought":         c.get("thought", ""),
             })
             event_id += 1
 
@@ -145,6 +146,8 @@ def build_frontend_json(batch_dir: Path) -> dict:
             "dag_depth":         s.get("dag_depth", 0),
             "reputation":        round(s.get("reputation", 0), 4),
             "elapsed_s":         round(r.get("elapsed_s", 0), 1),
+            "thought_log":       s.get("thought_log", []),
+            "self_portrait_svg": s.get("self_portrait_svg", ""),
         })
 
     return {
