@@ -171,6 +171,9 @@ class EnvironmentHarness:
                 "verified_claims": grounding.verified_claims,
                 "total_claims": grounding.total_claims,
                 "output_length": len(gen.text),
+                "output_preview": gen.text[:600],      # agent's analysis text
+                "data_summary": context.raw_data[:400], # actual metagraph numbers
+                "domain": context.domain,
                 "latency_ms": gen.latency_ms,
             },
         )

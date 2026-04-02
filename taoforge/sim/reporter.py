@@ -194,7 +194,7 @@ class SimReporter:
                 tasks=task_scores,
             )
             self.dashboard.update_score(
-                self._agent_id,
+                self.agent_label or self._agent_id,
                 score=result.aggregate_score,
             )
 
@@ -226,9 +226,10 @@ class SimReporter:
                 composite_score=round(result.composite_score, 4),
                 cycle_time_s=round(result.cycle_time_s, 1),
                 regressions=result.score_vector.regression_flags if result.score_vector else [],
+                thought=result.thought or "",
             )
             self.dashboard.update_score(
-                self._agent_id,
+                self.agent_label or self._agent_id,
                 score=result.delta_score if result.accepted else result.baseline_score,
                 improvement=result.raw_improvement,
                 mutation_type=result.mutation_type if result.accepted else "",

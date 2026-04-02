@@ -2,6 +2,9 @@
 """
 push_results.py — Transform batch results and push to GitHub → auto-deploys to Vercel.
 
+Merges new batch into existing batch-results.json so the dashboard accumulates
+agents across multiple runs rather than replacing them.
+
 Usage:
     python scripts/push_results.py --batch-dir /workspace/batch_results
 
@@ -69,10 +72,10 @@ def build_frontend_json(batch_dir: Path) -> dict:
     total_accepted = sum(r["summary"]["accepted"] for r in runs_data)
 
     stats = {
-        "active_agents":        summary["total_runs"],
-        "total_cycles":         total_cycles,
+        "active_agents":         summary["total_runs"],
+        "total_cycles":          total_cycles,
         "verified_improvements": total_accepted,
-        "avg_delta":            round(summary["avg_improvement"], 4),
+        "avg_delta":             round(summary["avg_improvement"], 4),
     }
 
     # ── Leaderboard (sorted by final score desc) ───────────────────────────────
@@ -122,7 +125,7 @@ def build_frontend_json(batch_dir: Path) -> dict:
     for key, label in MUTATION_LABELS.items():
         m = mut_agg.get(key, {})
         attempted = m.get("attempted", 0)
-        accepted_  = m.get("accepted", 0)
+        accepted_ = m.get("accepted", 0)
         mutations.append({
             "name":              label,
             "attempted":         attempted,
@@ -159,13 +162,125 @@ def build_frontend_json(batch_dir: Path) -> dict:
     }
 
 
+def merge_results(existing: dict, new: dict) -> dict:
+    """Merge a new batch into existing accumulated results.
+
+    - Runs: add new agents; if name collides, keep the higher-scoring one
+    - Events: append new events, re-numbering IDs sequentially
+    - Mutations: aggregate counts across all batches
+    - Stats: recompute from merged runs + events
+    """
+    # ── Runs: merge by name, keep higher final_score on collision ──────────────
+    existing_runs = {r["label"]: r for r in existing.get("runs", [])}
+    for run in new.get("runs", []):
+        name = run["label"]
+        if name not in existing_runs:
+            existing_runs[name] = run
+        else:
+            # Keep whichever run has the higher final score
+            if run["final_score"] > existing_runs[name]["final_score"]:
+                existing_runs[name] = run
+
+    merged_runs = list(existing_runs.values())
+    merged_runs.sort(key=lambda r: r["final_score"], reverse=True)
+
+    # ── Events: append new, re-number IDs ─────────────────────────────────────
+    existing_events = existing.get("events", [])
+    new_events = new.get("events", [])
+
+    # Find the set of (agent, cycle) pairs already in existing to avoid dupes
+    existing_keys = {(e["agent"], e.get("cycle"), e.get("mutation")) for e in existing_events}
+    to_add = [
+        e for e in new_events
+        if (e["agent"], e.get("cycle"), e.get("mutation")) not in existing_keys
+    ]
+
+    merged_events = existing_events + to_add
+    # Re-number IDs sequentially
+    for i, e in enumerate(merged_events, 1):
+        e["id"] = i
+
+    # ── Mutations: aggregate counts ────────────────────────────────────────────
+    mut_index = {m["name"]: m for m in existing.get("mutations", [])}
+    for m in new.get("mutations", []):
+        if m["name"] in mut_index:
+            ex = mut_index[m["name"]]
+            ex["attempted"]         += m["attempted"]
+            ex["accepted"]          += m["accepted"]
+            ex["total_improvement"] = round(ex["total_improvement"] + m["total_improvement"], 4)
+            ex["rate"] = round(
+                ex["accepted"] / ex["attempted"] * 100, 1
+            ) if ex["attempted"] else 0.0
+        else:
+            mut_index[m["name"]] = dict(m)
+
+    merged_mutations = sorted(mut_index.values(), key=lambda m: m["rate"], reverse=True)
+
+    # ── Stats: recompute from merged data ──────────────────────────────────────
+    total_cycles     = sum(r["total_cycles"] for r in merged_runs)
+    total_accepted   = sum(r["accepted"] for r in merged_runs)
+    improved_runs    = [r for r in merged_runs if r["total_improvement"] > 0]
+    avg_delta        = (
+        sum(r["total_improvement"] for r in improved_runs) / len(improved_runs)
+        if improved_runs else 0.0
+    )
+
+    merged_stats = {
+        "active_agents":         len(merged_runs),
+        "total_cycles":          total_cycles,
+        "verified_improvements": total_accepted,
+        "avg_delta":             round(avg_delta, 4),
+    }
+
+    # ── Leaderboard: rebuild from merged runs ──────────────────────────────────
+    merged_leaderboard = [
+        {
+            "name":         r["label"],
+            "score":        r["final_score"],
+            "improvements": r["accepted"],
+            "streak":       compute_streak(r.get("thought_log", [])),
+            "initial":      r["initial_score"],
+            "delta":        r["total_improvement"],
+        }
+        for r in merged_runs
+    ]
+    merged_leaderboard.sort(key=lambda x: x["score"], reverse=True)
+
+    return {
+        "stats":       merged_stats,
+        "leaderboard": merged_leaderboard,
+        "events":      merged_events,
+        "mutations":   merged_mutations,
+        "runs":        merged_runs,
+    }
+
+
 # ──────────────────────────────────────────────────────────────────────────────
-# GitHub API push
+# GitHub API
 # ──────────────────────────────────────────────────────────────────────────────
+
+def fetch_existing_from_github(token: str, repo: str, branch: str, path: str) -> dict | None:
+    """Fetch the current batch-results.json from GitHub, return parsed dict or None."""
+    import urllib.request
+    import urllib.error
+
+    api_url = f"https://api.github.com/repos/{repo}/contents/{path}?ref={branch}"
+    headers = {
+        "Authorization": f"token {token}",
+        "Accept":        "application/vnd.github+json",
+    }
+    try:
+        req = urllib.request.Request(api_url, headers=headers)
+        with urllib.request.urlopen(req) as resp:
+            data = json.loads(resp.read())
+            content = base64.b64decode(data["content"]).decode()
+            return json.loads(content)
+    except Exception:
+        return None
+
 
 def push_to_github(content: dict, token: str, repo: str, branch: str, path: str):
     import urllib.request
-    import urllib.error
 
     api_base = f"https://api.github.com/repos/{repo}/contents/{path}"
     headers = {
@@ -177,6 +292,7 @@ def push_to_github(content: dict, token: str, repo: str, branch: str, path: str)
     # Get current SHA (needed for update)
     sha = None
     try:
+        import urllib.error
         req = urllib.request.Request(f"{api_base}?ref={branch}", headers=headers)
         with urllib.request.urlopen(req) as resp:
             existing = json.loads(resp.read())
@@ -185,14 +301,14 @@ def push_to_github(content: dict, token: str, repo: str, branch: str, path: str)
         if e.code != 404:
             raise
 
-    # Encode content
     content_b64 = base64.b64encode(
         json.dumps(content, indent=2).encode()
     ).decode()
 
+    n = content["stats"]["active_agents"]
+    avg = content["stats"]["avg_delta"]
     payload = {
-        "message": f"chore: update batch results ({content['stats']['active_agents']} agents, "
-                   f"avg score {content['stats']['avg_delta']:.3f})",
+        "message": f"chore: update batch results ({n} agents, avg delta {avg:.3f})",
         "content": content_b64,
         "branch":  branch,
     }
@@ -214,40 +330,62 @@ def main():
     parser = argparse.ArgumentParser(description="Push batch results to GitHub → Vercel")
     parser.add_argument("--batch-dir", required=True,
                         help="Path to batch results directory (contains batch_summary.json)")
-    parser.add_argument("--repo",   default=os.environ.get("GITHUB_REPO", "taoforge/taoforge-web"),
+    parser.add_argument("--repo",    default=os.environ.get("GITHUB_REPO", "taoforge/taoforge-web"),
                         help="GitHub repo (default: taoforge/taoforge-web)")
-    parser.add_argument("--branch", default=os.environ.get("GITHUB_BRANCH", "main"),
+    parser.add_argument("--branch",  default=os.environ.get("GITHUB_BRANCH", "main"),
                         help="Branch to push to (default: main)")
-    parser.add_argument("--file",   default="public/data/batch-results.json",
+    parser.add_argument("--file",    default="public/data/batch-results.json",
                         help="Path in repo to update")
+    parser.add_argument("--no-merge", action="store_true",
+                        help="Replace instead of merging with existing results")
     parser.add_argument("--dry-run", action="store_true",
                         help="Transform but don't push — print JSON instead")
     args = parser.parse_args()
 
     batch_dir = Path(args.batch_dir)
     print(f"📂  Loading results from {batch_dir}...")
-    frontend_json = build_frontend_json(batch_dir)
+    new_json = build_frontend_json(batch_dir)
 
-    n_agents  = frontend_json["stats"]["active_agents"]
-    n_cycles  = frontend_json["stats"]["total_cycles"]
+    token = os.environ.get("GITHUB_TOKEN")
+
+    # Merge with existing unless --no-merge
+    if not args.no_merge and not args.dry_run:
+        if not token:
+            print("⚠️  GITHUB_TOKEN not set — skipping merge, will replace existing results.")
+            frontend_json = new_json
+        else:
+            print(f"🔄  Fetching existing results from GitHub to merge...")
+            existing = fetch_existing_from_github(token, args.repo, args.branch, args.file)
+            if existing:
+                prev_agents = existing["stats"]["active_agents"]
+                frontend_json = merge_results(existing, new_json)
+                print(f"✅  Merged: {prev_agents} existing + {new_json['stats']['active_agents']} new "
+                      f"= {frontend_json['stats']['active_agents']} total agents")
+            else:
+                print("ℹ️  No existing results found — pushing fresh.")
+                frontend_json = new_json
+    else:
+        frontend_json = new_json
+
+    n_agents   = frontend_json["stats"]["active_agents"]
+    n_cycles   = frontend_json["stats"]["total_cycles"]
     n_improved = sum(1 for r in frontend_json["runs"] if r["total_improvement"] > 0)
-    avg_score = sum(r["final_score"] for r in frontend_json["runs"]) / max(n_agents, 1)
+    avg_score  = sum(r["final_score"] for r in frontend_json["runs"]) / max(n_agents, 1)
 
-    print(f"✅  Transformed: {n_agents} agents, {n_cycles} cycles, "
+    print(f"📊  Results: {n_agents} agents, {n_cycles} cycles, "
           f"{n_improved}/{n_agents} improved, avg final score {avg_score:.4f}")
 
     if args.dry_run:
         print(json.dumps(frontend_json, indent=2))
         return
 
-    token = os.environ.get("GITHUB_TOKEN")
     if not token:
         print("❌  GITHUB_TOKEN not set. Export it or use --dry-run.", file=sys.stderr)
         sys.exit(1)
 
     print(f"🚀  Pushing to {args.repo}/{args.file} @ {args.branch}...")
     url = push_to_github(frontend_json, token, args.repo, args.branch, args.file)
-    print(f"✅  Pushed! File URL: {url}")
+    print(f"✅  Pushed! {url}")
     print(f"🌐  Vercel will deploy in ~30s → https://taoforge-web.vercel.app")
 
 

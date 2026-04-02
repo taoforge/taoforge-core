@@ -152,18 +152,27 @@ def _run_sim(args: argparse.Namespace) -> None:
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     )
 
+    use_env_sim = args.environment or ("subnet" if args.subnet_analysis else None)
+    subnet_system_prompt = (
+        "You are a rigorous blockchain data analyst specializing in Bittensor subnet metagraphs. "
+        "When analyzing subnet data, you always reference specific UIDs by number, cite exact stake "
+        "and incentive values, calculate concentration metrics, and identify structural patterns "
+        "in validator-miner relationships. You ground every claim in the data."
+    )
+
     if args.local:
         agent_config = AgentConfig(
             runtime="local_llm",
             model_name_or_path=args.model,
             device=args.device,
+            system_prompt=subnet_system_prompt if use_env_sim == "subnet" else "",
         )
     else:
         agent_config = AgentConfig(
             runtime="api",
             api_provider=args.provider,
             api_model=args.model,
-            system_prompt="You are a helpful assistant.",
+            system_prompt=subnet_system_prompt if use_env_sim == "subnet" else "You are a helpful assistant.",
         )
 
     sim_config = SimConfig(
@@ -219,18 +228,29 @@ def _run_batch(args: argparse.Namespace) -> None:
         stream=sys.stderr,
     )
 
+    # Resolve environment early so we can set the right system prompt
+    use_env = args.environment or ("subnet" if args.subnet_analysis else None)
+
+    subnet_system_prompt = (
+        "You are a rigorous blockchain data analyst specializing in Bittensor subnet metagraphs. "
+        "When analyzing subnet data, you always reference specific UIDs by number, cite exact stake "
+        "and incentive values, calculate concentration metrics, and identify structural patterns "
+        "in validator-miner relationships. You ground every claim in the data."
+    )
+
     if args.local:
         agent_config = AgentConfig(
             runtime="local_llm",
             model_name_or_path=args.model,
             device=args.device,
+            system_prompt=subnet_system_prompt if use_env == "subnet" else "",
         )
     else:
         agent_config = AgentConfig(
             runtime="api",
             api_provider=args.provider,
             api_model=args.model,
-            system_prompt="You are a helpful assistant.",
+            system_prompt=subnet_system_prompt if use_env == "subnet" else "You are a helpful assistant.",
         )
 
     sim_config = SimConfig(
@@ -239,9 +259,6 @@ def _run_batch(args: argparse.Namespace) -> None:
         json_output=False,
         verbose=False,
     )
-
-    # Resolve environment
-    use_env = args.environment or ("subnet" if args.subnet_analysis else None)
 
     evaluator = None
     if use_env == "subnet":

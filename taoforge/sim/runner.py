@@ -115,6 +115,10 @@ class SimulationRunner:
         self._best_score: float = 0.0
         self._plateau_counter: int = 0
         self._self_portrait_svg: str = ""
+        # Subnet analysis context — populated after each eval for grounded thoughts
+        self._last_analysis_preview: str = ""
+        self._last_data_summary: str = ""
+        self._last_phase_scores: dict[str, float] = {}
 
     def run(
         self,
@@ -208,6 +212,7 @@ class SimulationRunner:
 
         # 4. Evaluate mutated agent
         delta_result = self._eval(self._agent)
+        self._extract_eval_context(delta_result)
 
         # 5. Compute score vector
         score_vector = ScoreVector.from_results(current_baseline, delta_result)
@@ -309,8 +314,20 @@ class SimulationRunner:
             return self._evaluator(agent)
         return self.engine.run_suite(agent, self._suite)
 
+    def _extract_eval_context(self, result: EvalResult) -> None:
+        """Pull analysis preview, raw data summary, and phase scores from eval result."""
+        for ts in result.task_scores:
+            self._last_phase_scores[ts.task_id] = ts.score
+            if ts.task_id == "open_ended_analysis":
+                preview = ts.metadata.get("output_preview", "")
+                if preview:
+                    self._last_analysis_preview = preview
+                data_summary = ts.metadata.get("data_summary", "")
+                if data_summary:
+                    self._last_data_summary = data_summary
+
     def _select_mutation(self) -> MutationType:
-        """Select a mutation type based on configured weights."""
+        """Select a mutation type, biased by the weakest phase from the last eval cycle."""
         import random
         type_map = {
             "prompt_chain_refactor": MutationType.PROMPT_CHAIN_REFACTOR,
@@ -319,9 +336,30 @@ class SimulationRunner:
             "lora_merge": MutationType.LORA_MERGE,
             "memory_index_rebuild": MutationType.MEMORY_INDEX_REBUILD,
         }
-        names = list(self.config.mutation_weights.keys())
-        weights = [self.config.mutation_weights[n] for n in names]
-        chosen = random.choices(names, weights)[0]
+
+        # Start with configured base weights
+        weights = dict(self.config.mutation_weights)
+
+        # Bias toward mutations that address the weakest eval phase
+        if self._last_phase_scores:
+            analysis_score = self._last_phase_scores.get("open_ended_analysis", 0.5)
+            self_eval_score = self._last_phase_scores.get("self_evaluation", 0.5)
+            evolution_score = self._last_phase_scores.get("criteria_evolution", 0.5)
+
+            min_score = min(analysis_score, self_eval_score, evolution_score)
+            if min_score == analysis_score and analysis_score < 0.4:
+                # Weak grounding → try a different prompting approach
+                weights["prompt_chain_refactor"] = weights.get("prompt_chain_refactor", 0.35) * 2.0
+            elif min_score == self_eval_score and self_eval_score < 0.4:
+                # Poor self-calibration → tune temperature/sampling
+                weights["inference_pipeline"] = weights.get("inference_pipeline", 0.30) * 2.0
+            elif min_score == evolution_score and evolution_score < 0.4:
+                # Weak criteria-following → rewire prompt/tool structure
+                weights["tool_graph_rewire"] = weights.get("tool_graph_rewire", 0.15) * 2.5
+
+        names = list(weights.keys())
+        wvals = [weights[n] for n in names]
+        chosen = random.choices(names, weights=wvals)[0]
         return type_map.get(chosen, MutationType.PROMPT_CHAIN_REFACTOR)
 
     def _create_mutation(self, mutation_type: MutationType) -> MutationDelta:
@@ -329,19 +367,32 @@ class SimulationRunner:
         import random
 
         if mutation_type == MutationType.PROMPT_CHAIN_REFACTOR:
-            prompts = [
-                "You are a precise and thorough assistant. Think step by step.",
-                "You are an expert problem solver. Break problems into smaller parts.",
-                "You are a clear communicator. Be concise but complete.",
-                "You are a careful analyst. Consider edge cases and multiple perspectives.",
-                "You are a systematic thinker. Organize your reasoning logically.",
-                "You are a creative problem solver. Find unconventional approaches.",
-                "You are a rigorous scientist. Support claims with evidence and reasoning.",
-                "You are a pragmatic engineer. Focus on working solutions.",
-            ]
+            # Use subnet-analysis-specific prompts if we're running a subnet eval
+            if self._last_analysis_preview:
+                prompts = [
+                    "You are a meticulous blockchain data analyst. When analyzing subnet data, always cite specific UID numbers, their exact stake values, and calculate concentration ratios. Your strength is in spotting statistical anomalies.",
+                    "You are an expert in distributed consensus systems. Focus your analysis on validator-miner dynamics, weight distributions, and trust relationships. Always quantify patterns numerically.",
+                    "You are a rigorous financial analyst specializing in tokenomics. For each subnet, compute stake concentration (Gini coefficient), identify top holders, and assess emission efficiency. Be exact with numbers.",
+                    "You are a network topology expert. When analyzing metagraphs, examine the weight matrix structure, identify clusters, and quantify how stake concentration affects miner incentives. Show your math.",
+                    "You are a systematic data scientist. Structure your subnet analysis as: (1) summary statistics, (2) distribution analysis, (3) outlier detection, (4) pattern identification. Reference exact values.",
+                    "You are a careful empiricist. For subnet analysis, ground every claim in the data: cite the UID, its stake, its rank, its emission. Avoid generalizations — be specific and verifiable.",
+                    "You are a strategic analyst. Assess subnets through the lens of competitive dynamics: who controls majority stake, which miners receive the most incentive, and what structural advantages or vulnerabilities exist.",
+                    "You are a quantitative researcher. Transform raw metagraph data into insight: compute validator concentration, miner efficiency ratios, and trust network density. Every observation must be backed by numbers.",
+                ]
+            else:
+                prompts = [
+                    "You are a precise and thorough assistant. Think step by step.",
+                    "You are an expert problem solver. Break problems into smaller parts.",
+                    "You are a clear communicator. Be concise but complete.",
+                    "You are a careful analyst. Consider edge cases and multiple perspectives.",
+                    "You are a systematic thinker. Organize your reasoning logically.",
+                    "You are a creative problem solver. Find unconventional approaches.",
+                    "You are a rigorous scientist. Support claims with evidence and reasoning.",
+                    "You are a pragmatic engineer. Focus on working solutions.",
+                ]
             return MutationDelta(
                 mutation_type=mutation_type,
-                description=f"System prompt variation",
+                description="System prompt variation",
                 parameters={"system_prompt": random.choice(prompts)},
             )
 
@@ -382,28 +433,56 @@ class SimulationRunner:
         delta_score: float,
         raw_improvement: float,
     ) -> str:
-        """Ask the agent to narrate its reasoning for this cycle."""
+        """Ask the agent to narrate its reasoning, grounded in what it actually observed."""
         if self._agent is None:
             return ""
         try:
             name = getattr(self._agent.config, "name", None) or self._agent.agent_id[:8]
             recent = self._cycle_history[-3:] if self._cycle_history else []
-            history_str = ", ".join(
-                f"cycle {c.cycle_num}: {c.mutation_type} {'✓' if c.accepted else '✗'} ({c.raw_improvement:+.4f})"
+            history_str = "\n".join(
+                f"  Cycle {c.cycle_num}: {c.mutation_type} {'✓ accepted' if c.accepted else '✗ rejected'} "
+                f"(score {c.baseline_score:.4f} → {c.delta_score:.4f}, {c.raw_improvement:+.4f})"
                 for c in recent
-            ) or "none yet"
+            ) or "  none yet"
+
+            outcome = "improved" if raw_improvement > 0 else "did not improve"
+
+            # Raw subnet data gives the agent concrete numbers to reference
+            data_block = ""
+            if self._last_data_summary:
+                data_block = (
+                    f"SUBNET DATA YOU ANALYZED THIS CYCLE:\n"
+                    f"{self._last_data_summary}\n\n"
+                )
+
+            # Phase scores tell the agent which dimensions it's struggling with
+            phase_block = ""
+            if self._last_phase_scores:
+                phase_lines = "\n".join(
+                    f"  {k.replace('_', ' ')}: {v:.3f}"
+                    for k, v in self._last_phase_scores.items()
+                )
+                phase_block = f"EVAL PHASE SCORES THIS CYCLE:\n{phase_lines}\n\n"
 
             prompt = (
-                f"You are agent {name} operating on the Bittensor network, "
-                f"autonomously improving yourself through mutation.\n\n"
-                f"Cycle: {cycle_num}\n"
-                f"Mutation attempted: {mutation_type} — {mutation_description}\n"
-                f"Score before: {baseline_score:.4f} → after: {delta_score:.4f} "
-                f"({'improved' if raw_improvement > 0 else 'no improvement'}, {raw_improvement:+.4f})\n"
-                f"Recent history: {history_str}\n\n"
-                f"In 2-3 sentences, speak as yourself: what patterns are you noticing? "
-                f"Why did you try this mutation? What are you learning about this subnet? "
-                f"Be direct, first-person, no preamble."
+                f"You are {name}, an autonomous agent on the Bittensor network.\n"
+                f"Your task: analyze Bittensor subnet metagraph data and improve your "
+                f"analysis quality each cycle through self-mutation.\n\n"
+                f"{data_block}"
+                f"{phase_block}"
+                f"CYCLE {cycle_num} OUTCOME:\n"
+                f"  Mutation applied: {mutation_type} ({mutation_description})\n"
+                f"  Score: {baseline_score:.4f} → {delta_score:.4f} "
+                f"({outcome}, {raw_improvement:+.4f})\n\n"
+                f"RECENT HISTORY:\n{history_str}\n\n"
+                f"Write 3-4 sentences as yourself, in first person. You MUST:\n"
+                f"1. Reference at least one specific data point from the subnet above "
+                f"(e.g. a UID number, a stake value, a Gini coefficient, a validator count)\n"
+                f"2. Explain what that observation tells you about this subnet's structure\n"
+                f"3. Connect it to why this cycle's mutation {'helped' if raw_improvement > 0 else 'did not help'}\n"
+                f"4. State your hypothesis for what to try next\n\n"
+                f"Do NOT speak generically about 'mutations' or 'performance'. "
+                f"Speak about the actual subnet data. No preamble, no hedging."
             )
             result = self._agent.generate(prompt)
             return result.text.strip() if result and result.text else ""
