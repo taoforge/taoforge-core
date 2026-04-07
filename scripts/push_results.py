@@ -32,6 +32,7 @@ MUTATION_LABELS = {
     "lora_merge":            "LoRA Merge",
     "tool_graph_rewire":     "Tool Graph Rewire",
     "memory_index_rebuild":  "Memory Index Rebuild",
+    "subnet_switch":         "Subnet Switch",
 }
 
 
@@ -151,6 +152,8 @@ def build_frontend_json(batch_dir: Path) -> dict:
             "elapsed_s":         round(r.get("elapsed_s", 0), 1),
             "thought_log":       s.get("thought_log", []),
             "self_portrait_svg": s.get("self_portrait_svg", ""),
+            "netuid":            s.get("netuid", 1),
+            "subnet_history":    s.get("subnet_history", []),
         })
 
     return {
@@ -179,6 +182,7 @@ def merge_results(existing: dict, new: dict) -> dict:
         else:
             # Keep whichever run has the higher final score
             if run["final_score"] > existing_runs[name]["final_score"]:
+                # Preserve subnet_history from the winning run
                 existing_runs[name] = run
 
     merged_runs = list(existing_runs.values())

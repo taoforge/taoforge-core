@@ -15,6 +15,7 @@ class MutationType(enum.Enum):
     PROMPT_CHAIN_REFACTOR = "prompt_chain_refactor"
     MEMORY_INDEX_REBUILD = "memory_index_rebuild"
     INFERENCE_PIPELINE = "inference_pipeline"
+    SUBNET_SWITCH = "subnet_switch"
     COMPOUND = "compound"
 
 

@@ -31,6 +31,8 @@ class CycleResult:
     holdout_score: float = 0.0
     cycle_time_s: float = 0.0
     thought: str = ""  # agent's reasoning for this cycle
+    phase_scores: dict = field(default_factory=dict)  # specificity/accuracy/depth per cycle
+    netuid: int = 1  # which subnet was being analyzed this cycle
 
     def to_dict(self) -> dict:
         """Convert to JSON-serializable dict."""
@@ -47,6 +49,8 @@ class CycleResult:
             "proposal_id": self.proposal_id,
             "cycle_time_s": round(self.cycle_time_s, 2),
             "thought": self.thought,
+            "phase_scores": {k: round(v, 4) for k, v in self.phase_scores.items()},
+            "netuid": self.netuid,
         }
         if self.score_vector:
             d["breadth"] = round(self.score_vector.breadth, 4)
@@ -73,6 +77,10 @@ class SimSummary:
     # Agent introspection
     thought_log: list[dict] = field(default_factory=list)  # [{cycle, thought, mutation_type, accepted}]
     self_portrait_svg: str = ""   # latest SVG self-portrait (updates after each accepted mutation)
+    netuid: int = 1
+    subnet_history: list = field(default_factory=list)
+    peak_score: float = 0.0
+    peak_cycle: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -81,6 +89,8 @@ class SimSummary:
             "rejected": self.rejected_count,
             "initial_score": round(self.initial_score, 4),
             "final_score": round(self.final_score, 4),
+            "peak_score": round(self.peak_score, 4),
+            "peak_cycle": self.peak_cycle,
             "total_improvement": round(self.total_improvement, 4),
             "improvement_pct": round(
                 (self.total_improvement / self.initial_score * 100)
@@ -94,6 +104,8 @@ class SimSummary:
             "cycles": [c.to_dict() for c in self.cycles],
             "thought_log": self.thought_log,
             "self_portrait_svg": self.self_portrait_svg,
+            "netuid": self.netuid,
+            "subnet_history": self.subnet_history,
         }
 
     def to_json(self) -> str:

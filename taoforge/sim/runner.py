@@ -63,11 +63,12 @@ class SimConfig:
 
     # Mutation strategy weights (probability of selecting each type)
     mutation_weights: dict[str, float] = field(default_factory=lambda: {
-        "prompt_chain_refactor": 0.35,
-        "inference_pipeline": 0.30,
+        "prompt_chain_refactor": 0.30,
+        "inference_pipeline": 0.25,
         "tool_graph_rewire": 0.15,
-        "lora_merge": 0.15,
+        "lora_merge": 0.10,
         "memory_index_rebuild": 0.05,
+        "subnet_switch": 0.15,
     })
 
     # Output
@@ -119,6 +120,8 @@ class SimulationRunner:
         self._last_analysis_preview: str = ""
         self._last_data_summary: str = ""
         self._last_phase_scores: dict[str, float] = {}
+        self._current_netuid: int = 1  # will be set from evaluator profile if available
+        self._subnet_history: list[dict] = []
 
     def run(
         self,
@@ -203,6 +206,10 @@ class SimulationRunner:
         mutation_type = self._select_mutation()
         delta = self._create_mutation(mutation_type)
 
+        # Handle subnet switch: swap evaluator rather than mutating agent config
+        if mutation_type == MutationType.SUBNET_SWITCH:
+            return self._run_subnet_switch_cycle(cycle_num, current_baseline, delta, cycle_start)
+
         # 2. Save agent state (for rollback)
         pre_state_hash = self._agent.get_state_hash()
         pre_config = copy.deepcopy(self._agent.config)
@@ -213,6 +220,7 @@ class SimulationRunner:
         # 4. Evaluate mutated agent
         delta_result = self._eval(self._agent)
         self._extract_eval_context(delta_result)
+        phase_scores_snapshot = dict(self._last_phase_scores)  # snapshot before next cycle overwrites
 
         # 5. Compute score vector
         score_vector = ScoreVector.from_results(current_baseline, delta_result)
@@ -306,6 +314,143 @@ class SimulationRunner:
             holdout_score=holdout_result.aggregate_score,
             cycle_time_s=cycle_time,
             thought=thought,
+            phase_scores=phase_scores_snapshot,
+            netuid=self._current_netuid,
+        )
+
+    def _run_subnet_switch_cycle(
+        self,
+        cycle_num: int,
+        current_baseline: "EvalResult",
+        delta: "MutationDelta",
+        cycle_start: float,
+    ) -> "CycleResult":
+        """Handle a subnet_switch mutation — swap evaluator, eval, accept/reject."""
+        from taoforge.subnets.analysis_adapter import SubnetAnalysisAdapter
+        from taoforge.subnets.registry import SubnetRegistry, SubnetProfile, SubnetDomain
+        from taoforge.mutation.types import MutationType
+
+        target_netuid = delta.parameters.get("target_netuid", 1)
+        old_evaluator = self._evaluator
+        old_netuid = self._current_netuid
+
+        # Build adapter for target subnet
+        registry = SubnetRegistry()
+        profile = registry.get(target_netuid) or SubnetProfile(
+            netuid=target_netuid,
+            name=f"SN{target_netuid}",
+            domain=SubnetDomain.DATA,
+            benchmark_type="subnet_analysis",
+        )
+        new_adapter = SubnetAnalysisAdapter(profile)
+        self._evaluator = new_adapter.evaluate_locally
+
+        # Evaluate on new subnet — reject gracefully if snapshot unavailable
+        try:
+            delta_result = self._eval(self._agent)
+        except (FileNotFoundError, Exception) as e:
+            logger.warning(f"Subnet switch to SN{target_netuid} failed: {e}. Rejecting.")
+            self._evaluator = old_evaluator
+            cycle_time = time.monotonic() - cycle_start
+            return CycleResult(
+                cycle_num=cycle_num,
+                mutation_type=MutationType.SUBNET_SWITCH.value,
+                mutation_description=f"Switch to SN{target_netuid} failed: no data available",
+                baseline_score=current_baseline.aggregate_score,
+                delta_score=current_baseline.aggregate_score,
+                raw_improvement=0.0,
+                composite_score=0.0,
+                accepted=False,
+                cycle_time_s=cycle_time,
+                netuid=old_netuid,
+            )
+        self._extract_eval_context(delta_result)
+
+        raw_improvement = delta_result.aggregate_score - current_baseline.aggregate_score
+
+        # Build proposal for scoring
+        proposal = ImprovementProposal(
+            agent_id=self._agent.agent_id,
+            mutation_type=MutationType.SUBNET_SWITCH.value,
+            baseline_proof=BaselineProof(
+                zk_proof=b"\x00" * 64,
+                benchmark_id=self._suite.suite_id,
+                score_hash=hash_score(current_baseline.aggregate_score),
+            ),
+            delta_proof=DeltaProof(
+                zk_proof=b"\x00" * 64,
+                score_hash=hash_score(delta_result.aggregate_score),
+                improvement_claim=max(raw_improvement, 0.0),
+            ),
+            bond_amount=1.0,
+            parent_delta=self._proposal_history[-1].proposal_id if self._proposal_history else None,
+        )
+
+        holdout_result = self._eval(self._agent)
+        score_vector = ScoreVector.from_results(current_baseline, delta_result)
+        composite_score = compute_score(
+            proposal=proposal,
+            baseline_result=current_baseline,
+            delta_result=delta_result,
+            weights=self.config.scoring_weights,
+            dag=self.dag,
+            holdout_result=holdout_result,
+            proposal_history=self._proposal_history,
+        )
+
+        accepted = raw_improvement > 0 and composite_score > 0.01
+
+        if accepted:
+            self._current_netuid = target_netuid
+            self._subnet_history.append({
+                "netuid": target_netuid,
+                "cycle": cycle_num,
+                "score": round(delta_result.aggregate_score, 4),
+                "reason": delta.parameters.get("reason", ""),
+            })
+            from taoforge.registry.node import DAGNode
+            node = DAGNode(
+                node_id=proposal.proposal_id,
+                agent_id=self._agent.agent_id,
+                parent_id=proposal.parent_delta,
+                mutation_type=MutationType.SUBNET_SWITCH.value,
+                improvement_delta=raw_improvement,
+                benchmark_id=self._suite.suite_id,
+                proof_hash=hash_score(delta_result.aggregate_score),
+                reputation_at_time=self.reputation.get_reputation(self._agent.agent_id),
+            )
+            self.dag.add_node(node)
+            self.reputation.update(self._agent.agent_id, raw_improvement)
+            self._proposal_history.append(proposal)
+        else:
+            # Restore old evaluator — don't switch
+            self._evaluator = old_evaluator
+
+        thought = self._generate_thought(
+            cycle_num=cycle_num,
+            mutation_type=MutationType.SUBNET_SWITCH.value,
+            mutation_description=delta.description,
+            baseline_score=current_baseline.aggregate_score,
+            delta_score=delta_result.aggregate_score,
+            raw_improvement=raw_improvement,
+        )
+
+        cycle_time = time.monotonic() - cycle_start
+        return CycleResult(
+            cycle_num=cycle_num,
+            mutation_type=MutationType.SUBNET_SWITCH.value,
+            mutation_description=delta.description,
+            baseline_score=current_baseline.aggregate_score,
+            delta_score=delta_result.aggregate_score,
+            raw_improvement=raw_improvement,
+            composite_score=composite_score,
+            score_vector=score_vector,
+            accepted=accepted,
+            proposal_id=proposal.proposal_id if accepted else None,
+            delta_result=delta_result if accepted else None,
+            holdout_score=holdout_result.aggregate_score,
+            cycle_time_s=cycle_time,
+            thought=thought,
         )
 
     def _eval(self, agent: Agent) -> EvalResult:
@@ -335,6 +480,7 @@ class SimulationRunner:
             "tool_graph_rewire": MutationType.TOOL_GRAPH_REWIRE,
             "lora_merge": MutationType.LORA_MERGE,
             "memory_index_rebuild": MutationType.MEMORY_INDEX_REBUILD,
+            "subnet_switch": MutationType.SUBNET_SWITCH,
         }
 
         # Start with configured base weights
@@ -356,6 +502,10 @@ class SimulationRunner:
             elif min_score == evolution_score and evolution_score < 0.4:
                 # Weak criteria-following → rewire prompt/tool structure
                 weights["tool_graph_rewire"] = weights.get("tool_graph_rewire", 0.15) * 2.5
+
+            # If we've been stuck for 2+ cycles and have a subnet evaluator, strongly bias toward switching
+            if self._plateau_counter >= 2 and self._evaluator is not None:
+                weights["subnet_switch"] = weights.get("subnet_switch", 0.15) * (1 + self._plateau_counter)
 
         names = list(weights.keys())
         wvals = [weights[n] for n in names]
@@ -416,6 +566,81 @@ class SimulationRunner:
                 mutation_type=mutation_type,
                 description="Tool configuration change",
                 parameters={"tools": random.choice(tool_sets)},
+            )
+
+        elif mutation_type == MutationType.SUBNET_SWITCH:
+            from taoforge.subnets.registry import SubnetRegistry
+            from taoforge.subnets.data import _SNAPSHOTS_DIR
+            registry = SubnetRegistry()
+            all_subnets = registry.get_all()
+            # Only offer subnets that have a cached snapshot available
+            def _has_snapshot(netuid: int) -> bool:
+                return bool(list(_SNAPSHOTS_DIR.glob(f"sn{netuid}_*.json")))
+            other_subnets = [
+                s for s in all_subnets
+                if s.netuid != self._current_netuid and s.netuid != 0 and _has_snapshot(s.netuid)
+            ]
+            # If no other subnets have snapshots, fall back to any registered subnet
+            if not other_subnets:
+                other_subnets = [s for s in all_subnets if s.netuid != self._current_netuid and s.netuid != 0]
+
+            name = getattr(self._agent.config, "name", None) or self._agent.agent_id[:8] if self._agent else "agent"
+            current_name = registry.get(self._current_netuid)
+            current_subnet_name = current_name.name if current_name else f"SN{self._current_netuid}"
+            subnet_list = "\n".join(
+                f"  SN{s.netuid} ({s.name}): {s.description}"
+                for s in sorted(other_subnets, key=lambda x: x.netuid)
+            )
+            history_str = ""
+            if self._subnet_history:
+                history_str = "\nSubnets you have already visited:\n" + "\n".join(
+                    f"  SN{h['netuid']}: score {h['score']:.4f} at cycle {h['cycle']}"
+                    for h in self._subnet_history
+                ) + "\n"
+
+            prompt = (
+                f"You are {name}, an autonomous agent on Bittensor.\n"
+                f"You have been analyzing SN{self._current_netuid} ({current_subnet_name}) "
+                f"for several cycles with no improvement.\n"
+                f"Current score: {self._best_score:.4f}\n"
+                f"{history_str}\n"
+                f"Available subnets to explore:\n{subnet_list}\n\n"
+                f"Which subnet should you analyze next to maximize your improvement potential?\n"
+                f"Consider: your current analysis strengths, which subnets have rich validator-miner data, "
+                f"and where your approach is most likely to score well.\n\n"
+                f"Respond with ONLY a JSON object, nothing else:\n"
+                f"{{\"netuid\": <number>, \"reason\": \"<one sentence why>\"}}"
+            )
+
+            target_netuid = None
+            reason = ""
+            if self._agent:
+                try:
+                    result = self._agent.generate(prompt)
+                    if result and result.text:
+                        import json as _json
+                        import re as _re
+                        text = result.text.strip()
+                        m = _re.search(r'\{[^}]+\}', text)
+                        if m:
+                            parsed = _json.loads(m.group())
+                            target_netuid = int(parsed.get("netuid", 0))
+                            reason = parsed.get("reason", "")
+                except Exception:
+                    pass
+
+            # Fallback: pick the subnet the agent hasn't tried yet with the most neurons
+            if not target_netuid or target_netuid == self._current_netuid:
+                visited = {h["netuid"] for h in self._subnet_history} | {self._current_netuid}
+                unvisited = [s for s in other_subnets if s.netuid not in visited]
+                chosen = random.choice(unvisited) if unvisited else random.choice(other_subnets)
+                target_netuid = chosen.netuid
+                reason = f"Exploring {chosen.name} as next unvisited subnet"
+
+            return MutationDelta(
+                mutation_type=mutation_type,
+                description=f"Switch to SN{target_netuid}: {reason}",
+                parameters={"target_netuid": target_netuid, "reason": reason},
             )
 
         else:
@@ -604,15 +829,28 @@ class SimulationRunner:
 
         initial_score = self._cycle_history[0].baseline_score if self._cycle_history else 0.0
 
+        peak_score = max((c.delta_score for c in self._cycle_history), default=0.0)
+        peak_cycle = next(
+            (c.cycle_num for c in self._cycle_history if c.delta_score == peak_score), 0
+        )
+
         thought_log = [
             {
                 "cycle": c.cycle_num,
                 "mutation_type": c.mutation_type,
+                "mutation_description": c.mutation_description,
                 "accepted": c.accepted,
+                "baseline_score": round(c.baseline_score, 4),
+                "delta_score": round(c.delta_score, 4),
                 "delta": round(c.raw_improvement, 4),
+                "composite_score": round(c.composite_score, 4),
+                "holdout_score": round(c.holdout_score, 4),
+                "cycle_time_s": round(c.cycle_time_s, 2),
+                "phase_scores": {k: round(v, 4) for k, v in c.phase_scores.items()},
+                "netuid": c.netuid,
                 "thought": c.thought,
             }
-            for c in self._cycle_history if c.thought
+            for c in self._cycle_history
         ]
 
         return SimSummary(
@@ -621,6 +859,8 @@ class SimulationRunner:
             rejected_count=len(rejected),
             initial_score=initial_score,
             final_score=final_baseline.aggregate_score,
+            peak_score=peak_score,
+            peak_cycle=peak_cycle,
             total_improvement=final_baseline.aggregate_score - initial_score,
             best_composite_score=max((c.composite_score for c in accepted), default=0.0),
             mutation_stats=mutation_stats,
@@ -632,4 +872,6 @@ class SimulationRunner:
             cycles=self._cycle_history,
             thought_log=thought_log,
             self_portrait_svg=self._self_portrait_svg,
+            netuid=self._current_netuid,
+            subnet_history=self._subnet_history,
         )

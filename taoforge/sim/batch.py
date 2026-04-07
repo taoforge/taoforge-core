@@ -512,7 +512,7 @@ def _push_results_to_github(results_dir: Path, token: str, repo: str, branch: st
         if str(scripts_path) not in sys.path:
             sys.path.insert(0, str(scripts_path))
 
-        from push_results import build_frontend_json, push_to_github
+        from push_results import build_frontend_json, push_to_github, fetch_existing_from_github, merge_results
 
         try:
             from rich.console import Console
@@ -521,7 +521,42 @@ def _push_results_to_github(results_dir: Path, token: str, repo: str, branch: st
         except ImportError:
             print("\n📡 Pushing results to GitHub → Vercel...", file=sys.stderr)
 
-        frontend_json = build_frontend_json(results_dir)
+        new_json = build_frontend_json(results_dir)
+
+        # Step 1: merge against local file first (always available, no token needed)
+        local_results = Path(__file__).parent.parent.parent / "taoforge-web" / "public" / "data" / "batch-results.json"
+        existing = None
+        if local_results.exists():
+            try:
+                import json as _json
+                existing = _json.loads(local_results.read_text())
+            except Exception:
+                pass
+
+        # Step 2: if local had nothing, try GitHub
+        if not existing and token:
+            existing = fetch_existing_from_github(token, repo, branch, "public/data/batch-results.json")
+
+        if existing:
+            prev_count = existing["stats"]["active_agents"]
+            frontend_json = merge_results(existing, new_json)
+            merged_count = frontend_json["stats"]["active_agents"]
+            try:
+                console.print(f"[dim]   Merged: {prev_count} existing + {new_json['stats']['active_agents']} new = {merged_count} total agents[/dim]")
+            except Exception:
+                print(f"   Merged: {prev_count} + {new_json['stats']['active_agents']} = {merged_count} agents", file=sys.stderr)
+        else:
+            frontend_json = new_json
+
+        # Step 3: always write back to local file so next batch can merge against it
+        local_results.parent.mkdir(parents=True, exist_ok=True)
+        import json as _json
+        local_results.write_text(_json.dumps(frontend_json, indent=2))
+        try:
+            console.print(f"[dim]   Local cache updated: {local_results}[/dim]")
+        except Exception:
+            pass
+
         url = push_to_github(
             content=frontend_json,
             token=token,

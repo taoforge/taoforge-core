@@ -133,6 +133,18 @@ class SubnetRegistry:
                 benchmark_type="performance",
                 model_type="inference",
             ),
+            SubnetProfile(netuid=3, name="MyShell", domain=SubnetDomain.TEXT_GENERATION,
+                description="Personalised AI assistant subnet", benchmark_type="subnet_analysis", model_type="llm"),
+            SubnetProfile(netuid=8, name="Taoshi", domain=SubnetDomain.DATA,
+                description="Price prediction and financial signals subnet", benchmark_type="subnet_analysis", model_type="llm"),
+            SubnetProfile(netuid=11, name="Dippy", domain=SubnetDomain.TEXT_GENERATION,
+                description="Roleplay and social AI subnet", benchmark_type="subnet_analysis", model_type="llm"),
+            SubnetProfile(netuid=18, name="Cortex.t", domain=SubnetDomain.INFERENCE,
+                description="General AI inference and model serving subnet", benchmark_type="subnet_analysis", model_type="llm"),
+            SubnetProfile(netuid=19, name="Nineteen", domain=SubnetDomain.INFERENCE,
+                description="High-throughput LLM inference subnet", benchmark_type="subnet_analysis", model_type="llm"),
+            SubnetProfile(netuid=25, name="Protein Folding", domain=SubnetDomain.DATA,
+                description="Protein structure prediction subnet", benchmark_type="subnet_analysis", model_type="llm"),
         ]
         for profile in defaults:
             self._subnets[profile.netuid] = profile
