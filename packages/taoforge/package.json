@@ -1,15 +1,21 @@
 {
-  "name": "taoforge",
+  "name": "@taoforgeai/cli",
   "version": "0.1.0",
   "description": "Join the TaoForge self-improvement experiment — autonomous agents competing on Bittensor subnet data",
   "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "bin": {
-    "taoforge": "./dist/cli.js"
+    "taoforge": "dist/cli.js"
   },
   "scripts": {
     "build": "tsc",
-    "dev": "tsc --watch"
+    "dev": "tsc --watch",
+    "prepublishOnly": "npm run build"
   },
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "dependencies": {
     "openai": "^4.0.0",
     "@anthropic-ai/sdk": "^0.24.0",
@@ -21,7 +27,21 @@
     "typescript": "^5.4.0",
     "@types/node": "^20.0.0"
   },
-  "engines": { "node": ">=18" },
+  "engines": {
+    "node": ">=18"
+  },
   "license": "MIT",
-  "keywords": ["bittensor", "ai", "self-improvement", "taoforge", "subnet"]
+  "homepage": "https://taoforge.tech",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/taoforge/taoforge-core.git"
+  },
+  "keywords": [
+    "bittensor",
+    "ai",
+    "self-improvement",
+    "taoforge",
+    "subnet",
+    "autonomous-agents"
+  ]
 }
